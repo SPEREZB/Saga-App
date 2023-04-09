@@ -1,7 +1,10 @@
-﻿using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.AspNetCore.Mvc.Diagnostics;
+using Microsoft.EntityFrameworkCore;
+using Newtonsoft.Json;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 using System;
+using System.Diagnostics;
 using System.Text;
 namespace Saga_App
 {
@@ -107,6 +110,8 @@ namespace Saga_App
 
                     }
                 }
+                 
+
 
             }
             catch (Exception ex)
@@ -115,6 +120,8 @@ namespace Saga_App
                 Console.WriteLine($"Error occurred: {ex.Message}");
             }
         }
+
+      
         //COMPLETAR NUESTRA SAGA
         public void CompleteSaga(Order order, Payment payment)
         {
@@ -142,44 +149,63 @@ namespace Saga_App
     //NUESTRA SAGA
     public class Saga
     {
-        private readonly AppDbContext _dbContext;
-        private readonly IModel _rabbitMQChannel;
-        private readonly OrderPaymentSaga _saga = new OrderPaymentSaga();
-
+        private List<AppDbContext> dbContexts; // Colección de DbContexts
+        private IConnection rabbitMqConnection; // Conexión de RabbitMQ
+        private OrderPaymentSaga saga = new OrderPaymentSaga();
         public Saga()
-        { 
-        }
-        public Saga(AppDbContext dbContext, IModel rabbitMQChannel)
         {
-            _dbContext = dbContext;
-            _rabbitMQChannel = rabbitMQChannel; 
+         
+        }
+        public Saga(List<AppDbContext> dbContexts, IConnection rabbitMqConnection)
+        {
+            this.dbContexts = dbContexts;
+            this.rabbitMqConnection = rabbitMqConnection;
         }
 
         public string ProcessOrder(Order order, Payment pay)
         {
             try
             {
-
                 // INICIAR SAGA
-                _saga.StartSaga(order, pay);
+                saga.StartSaga(order, pay);
 
-              
-                var payment = new Payment
+                foreach (var dbContext in dbContexts)
                 {
-                    OrderId = order.Id,
-                    Amount = pay.Amount,
-                    Status = "Completed"
-                };
+                    // Actualizamos la entidad en cada DbContext
+                    //OJO SE DEBE TENER LA TABLA CREADA EN NUESTRA BD CORRESPONDIENTE
+                    //EN ESTE CASO CON EL NOMBRE DE Payments
+                    var entity = dbContext.Set<Payment>()
+                        .FirstOrDefault(e => e.Id == order.Id);
+
+                    if (entity != null)
+                    {
+                        // Realizar la actualización en el DbContext
+                        // Aquí se pueden realizar cambios en la entidad
+                        //En este caso solo Status
+                        entity.Status = "Completed";
+                        dbContext.SaveChanges();
+                    }
+                }
+
+                // Publicar evento de actualización completada a RabbitMQ
+                using (var channel = rabbitMqConnection.CreateModel())
+                {
+                    channel.ExchangeDeclare("eventExchange", ExchangeType.Direct);
+                    var message = new { OrderId = order.Id, EventType = "UpdateComplete" };
+                    var body = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(message));
+
+                    channel.BasicPublish("eventExchange", "updateComplete", null, body);
+                }
 
                 // COMPLETAR SAGA
-                _saga.CompleteSaga(order, payment);
+                saga.CompleteSaga(order, pay);
 
                 return "bienn";
             }
             catch (Exception ex)
-            { 
-                Console.WriteLine($"Error occurred: {ex.Message}"); 
-                _saga.FailSaga(order, null);
+            {
+                Console.WriteLine($"Error occurred: {ex.Message}");
+                saga.FailSaga(order, null);
                 return "mall";
             }
         }
